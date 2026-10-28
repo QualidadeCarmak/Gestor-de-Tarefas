@@ -6,6 +6,7 @@
 <title>Action Hub Qualidade · Carmak</title>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.0/dist/umd/supabase.min.js"></script>
 <style>
 :root {
   --navy: #0C2340;
@@ -547,12 +548,19 @@ const STATUS_OPTS = [
 ];
 const PRIO_OPTS = ["Alta", "Media", "Baixa"];
 const STORAGE_KEY = "actionhub_qualidade_v2";
+const SB_URL = "https://tfcuoeeunvdkuksygvgw.supabase.co";
+const SB_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRmY3VvZWV1bnZka3Vrc3lndmd3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMyMTcyOTQsImV4cCI6MjEwODc5MzI5NH0.QSBJ6N6IBTZ4mRPMLaB4l7TewF8qqKYylWDR-ERoz58";
+const SB_BUCKET = "ahq-anexos";
+
+const supabase = window.supabase.createClient(SB_URL, SB_ANON);
 
 let DB = { nextSeq: 1, demands: [] };
 let currentId = null;
 let pendingFiles = [];
 let currentScreen = null;
 let filterVencidas = false;
+let onlineMode = true; // false = using localStorage fallback
+let syncQueue = []; // pending local changes when offline
 
 function $(sel) { return document.querySelector(sel); }
 function esc(s) { if (s == null) return ""; return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
@@ -565,13 +573,243 @@ function prioCls(p) { if (p === "Alta") return "prio-alta"; if (p === "Media") r
 function toast(msg, type) { const t = $("#toast"); t.textContent = msg; t.className = "toast on" + (type ? " " + type : ""); setTimeout(() => t.classList.remove("on"), 2800); }
 function genId() { const seq = String(DB.nextSeq).padStart(3, "0"); DB.nextSeq++; return "ID-" + seq; }
 
-function loadDB() {
+function saveLocal() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ nextSeq: DB.nextSeq, demands: DB.demands, syncQueue })); } catch (e) { console.warn(e); }
+}
+function loadLocal() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) { const p = JSON.parse(raw); DB.nextSeq = p.nextSeq || 1; DB.demands = p.demands || []; }
+    if (raw) {
+      const p = JSON.parse(raw);
+      DB.nextSeq = p.nextSeq || 1;
+      DB.demands = p.demands || [];
+      syncQueue = p.syncQueue || [];
+    }
   } catch (e) { console.warn(e); }
 }
-function saveDB() { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(DB)); } catch (e) { toast("Erro ao salvar", "err"); } }
+
+function mapRowToTask(row, updates) {
+  return {
+    id: row.id,
+    descricao: row.descricao || "",
+    responsavel: row.responsavel || "",
+    solicitante: row.solicitante || "",
+    area: row.area || "",
+    prioridade: row.prioridade || "Media",
+    status: row.status || "nao_iniciado",
+    inicio: row.inicio || null,
+    previsto: row.previsto || null,
+    real: row.real || null,
+    createdAt: row.created_at || null,
+    updatedAt: row.updated_at || null,
+    updates: updates || []
+  };
+}
+
+async function fetchAllFromSupabase() {
+  const { data: tarefas, error } = await supabase
+    .from("ahq_tarefas")
+    .select("*")
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+
+  const { data: atualizacoes, error: e2 } = await supabase
+    .from("ahq_atualizacoes")
+    .select("*")
+    .order("created_at", { ascending: false });
+  if (e2) throw e2;
+
+  const { data: anexos, error: e3 } = await supabase
+    .from("ahq_anexos")
+    .select("*");
+  if (e3) throw e3;
+
+  const anexosByUpd = {};
+  (anexos || []).forEach(a => {
+    if (!anexosByUpd[a.atualizacao_id]) anexosByUpd[a.atualizacao_id] = [];
+    anexosByUpd[a.atualizacao_id].push(a);
+  });
+
+  const updatesByTask = {};
+  (atualizacoes || []).forEach(u => {
+    if (!updatesByTask[u.tarefa_id]) updatesByTask[u.tarefa_id] = [];
+    const files = (anexosByUpd[u.id] || []).map(a => ({
+      name: a.nome,
+      size: a.size_bytes,
+      type: a.content_type,
+      path: a.path,
+      dataUrl: null // signed on demand
+    }));
+    updatesByTask[u.tarefa_id].push({
+      id: u.id,
+      date: u.created_at,
+      text: u.texto,
+      statusAtTime: u.status_at_time,
+      attachments: files
+    });
+  });
+
+  DB.demands = (tarefas || []).map(t => mapRowToTask(t, updatesByTask[t.id] || []));
+  onlineMode = true;
+  saveLocal();
+}
+
+async function loadDB() {
+  loadLocal();
+  try {
+    await fetchAllFromSupabase();
+    onlineMode = true;
+    if (syncQueue.length) await flushSyncQueue();
+  } catch (e) {
+    console.warn("Supabase offline/fallback", e);
+    onlineMode = false;
+    toast("Modo offline — dados locais", "err");
+  }
+}
+
+function saveDB() {
+  // memory already updated; persist local cache always
+  saveLocal();
+}
+
+async function genId() {
+  if (onlineMode) {
+    try {
+      const { data, error } = await supabase.rpc("ahq_next_id");
+      if (error) throw error;
+      return data; // ID-001
+    } catch (e) {
+      console.warn(e);
+      onlineMode = false;
+    }
+  }
+  const seq = String(DB.nextSeq).padStart(3, "0");
+  DB.nextSeq++;
+  saveLocal();
+  return "ID-" + seq;
+}
+
+async function sbUpsertTarefa(d) {
+  const row = {
+    id: d.id,
+    descricao: d.descricao || "",
+    responsavel: d.responsavel || "",
+    solicitante: d.solicitante || "",
+    area: d.area || "",
+    prioridade: d.prioridade || "Media",
+    status: d.status || "nao_iniciado",
+    inicio: d.inicio || null,
+    previsto: d.previsto || null,
+    real: d.real || null,
+    created_at: d.createdAt || new Date().toISOString(),
+    updated_at: d.updatedAt || new Date().toISOString()
+  };
+  const { error } = await supabase.from("ahq_tarefas").upsert(row);
+  if (error) throw error;
+}
+
+async function sbDeleteTarefa(id) {
+  const { error } = await supabase.from("ahq_tarefas").delete().eq("id", id);
+  if (error) throw error;
+}
+
+async function sbInsertAtualizacao(tarefaId, u) {
+  const row = {
+    id: u.id && String(u.id).length > 20 ? u.id : undefined,
+    tarefa_id: tarefaId,
+    texto: u.text || "",
+    status_at_time: u.statusAtTime || null,
+    created_at: u.date || new Date().toISOString()
+  };
+  // remove undefined id so default uuid applies
+  if (!row.id) delete row.id;
+  const { data, error } = await supabase.from("ahq_atualizacoes").insert(row).select().single();
+  if (error) throw error;
+  return data;
+}
+
+async function uploadAttachment(tarefaId, atualizacaoId, fileObj) {
+  // fileObj: { name, size, type, dataUrl }
+  if (!fileObj.dataUrl) return null;
+  const safeName = (fileObj.name || "file").replace(/[^a-zA-Z0-9._-]/g, "_");
+  const path = `${tarefaId}/${atualizacaoId}/${Date.now()}_${safeName}`;
+  const res = await fetch(fileObj.dataUrl);
+  const blob = await res.blob();
+  const { error } = await supabase.storage.from(SB_BUCKET).upload(path, blob, {
+    contentType: fileObj.type || blob.type || "application/octet-stream",
+    upsert: false
+  });
+  if (error) throw error;
+  const meta = {
+    atualizacao_id: atualizacaoId,
+    nome: fileObj.name || safeName,
+    path,
+    size_bytes: fileObj.size || blob.size || null,
+    content_type: fileObj.type || blob.type || null
+  };
+  const { error: e2 } = await supabase.from("ahq_anexos").insert(meta);
+  if (e2) throw e2;
+  return { name: meta.nome, size: meta.size_bytes, type: meta.content_type, path };
+}
+
+async function getSignedUrl(path) {
+  const { data, error } = await supabase.storage.from(SB_BUCKET).createSignedUrl(path, 3600);
+  if (error) throw error;
+  return data.signedUrl;
+}
+
+async function flushSyncQueue() {
+  if (!syncQueue.length || !onlineMode) return;
+  const q = syncQueue.slice();
+  for (const item of q) {
+    try {
+      if (item.type === "upsert") await sbUpsertTarefa(item.data);
+      else if (item.type === "delete") await sbDeleteTarefa(item.id);
+      // attachments/updates are re-sent in full upsert path for simplicity when coming back online via full push
+    } catch (e) {
+      console.warn("sync item failed", e);
+      return; // stop, try later
+    }
+  }
+  syncQueue = [];
+  saveLocal();
+}
+
+async function persistTarefa(d) {
+  saveLocal();
+  if (!onlineMode) {
+    syncQueue.push({ type: "upsert", data: d });
+    saveLocal();
+    return;
+  }
+  try {
+    await sbUpsertTarefa(d);
+  } catch (e) {
+    console.warn(e);
+    onlineMode = false;
+    syncQueue.push({ type: "upsert", data: d });
+    saveLocal();
+    toast("Salvo localmente (offline)", "err");
+  }
+}
+
+async function persistDelete(id) {
+  saveLocal();
+  if (!onlineMode) {
+    syncQueue.push({ type: "delete", id });
+    saveLocal();
+    return;
+  }
+  try {
+    await sbDeleteTarefa(id);
+  } catch (e) {
+    console.warn(e);
+    onlineMode = false;
+    syncQueue.push({ type: "delete", id });
+    saveLocal();
+    toast("Exclusão local (offline)", "err");
+  }
+}
 
 function showGuia() {
   $("#guia").classList.add("on"); $("#topbar").style.display = "none";
@@ -807,7 +1045,11 @@ function renderDrawerForm(d) {
   let tlHtml = "";
   if (!updates.length) tlHtml = `<div class="muted text-sm">Nenhuma atualização ainda.</div>`;
   else updates.forEach(u => {
-    const files = (u.attachments || []).map(f => `<a class="tl-file" href="${f.dataUrl || "#"}" download="${esc(f.name)}">📎 ${esc(f.name)}</a>`).join("");
+    const files = (u.attachments || []).map(f => {
+      if (f.path) return `<a class="tl-file" href="#" data-path="${esc(f.path)}" data-name="${esc(f.name)}">📎 ${esc(f.name)}</a>`;
+      if (f.dataUrl) return `<a class="tl-file" href="${f.dataUrl}" download="${esc(f.name)}">📎 ${esc(f.name)}</a>`;
+      return `<span class="tl-file">📎 ${esc(f.name)}</span>`;
+    }).join("");
     tlHtml += `<div class="tl-item"><div class="tl-date">${fmtDate(u.date)} ${u.date ? new Date(u.date).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"}) : ""}${u.statusAtTime ? `<span class="tl-status">${esc(statusLabel(u.statusAtTime))}</span>` : ""}</div><div class="tl-text">${esc(u.text)}</div>${files ? `<div class="tl-files">${files}</div>` : ""}</div>`;
   });
   return `<div class="form-grid">
@@ -832,6 +1074,17 @@ function renderDrawerForm(d) {
 
 function bindDrawerEvents(d) {
   $("#btnAddUpdate").onclick = () => addUpdate(d.id);
+  document.querySelectorAll(".tl-file[data-path]").forEach(a => {
+    a.onclick = async (ev) => {
+      ev.preventDefault();
+      try {
+        const url = await getSignedUrl(a.getAttribute("data-path"));
+        window.open(url, "_blank");
+      } catch (e) {
+        toast("Não foi possível abrir o anexo", "err");
+      }
+    };
+  });
   $("#u_files").onchange = (e) => {
     const files = Array.from(e.target.files || []);
     if (pendingFiles.length + files.length > 3) { toast("Máximo 3 arquivos por atualização", "err"); return; }
@@ -849,17 +1102,55 @@ function renderPendingFiles() {
   el.innerHTML = pendingFiles.map((f, i) => `<span class="file-chip">${esc(f.name)} <button type="button" data-rm="${i}">×</button></span>`).join("");
   el.querySelectorAll("[data-rm]").forEach(btn => { btn.onclick = () => { pendingFiles.splice(+btn.getAttribute("data-rm"), 1); renderPendingFiles(); }; });
 }
-function addUpdate(id) {
+async function addUpdate(id) {
   const d = DB.demands.find(x => x.id === id); if (!d) return;
   const text = ($("#u_text").value || "").trim();
   if (!text && !pendingFiles.length) { toast("Escreva uma atualização ou anexe um arquivo", "err"); return; }
-  d.updates = d.updates || [];
-  d.updates.unshift({ id: "u"+Date.now(), date: new Date().toISOString(), text: text || "(anexo)", statusAtTime: d.status, attachments: pendingFiles.slice() });
-  d.updatedAt = new Date().toISOString(); pendingFiles = [];
-  saveDB(); openDrawer(id); toast("Atualização adicionada", "ok");
-  if (currentScreen === "gestao") renderList();
+  const btn = $("#btnAddUpdate");
+  if (btn) { btn.disabled = true; btn.textContent = "Enviando…"; }
+  try {
+    const upd = {
+      id: "u" + Date.now(),
+      date: new Date().toISOString(),
+      text: text || "(anexo)",
+      statusAtTime: d.status,
+      attachments: []
+    };
+    if (onlineMode) {
+      try {
+        const row = await sbInsertAtualizacao(id, upd);
+        upd.id = row.id;
+        for (const f of pendingFiles) {
+          try {
+            const meta = await uploadAttachment(id, upd.id, f);
+            if (meta) upd.attachments.push(meta);
+          } catch (e) {
+            console.warn("upload fail", e);
+            toast("Falha em um anexo: " + (f.name || ""), "err");
+          }
+        }
+      } catch (e) {
+        console.warn(e);
+        onlineMode = false;
+        upd.attachments = pendingFiles.slice();
+        toast("Atualização salva localmente (offline)", "err");
+      }
+    } else {
+      upd.attachments = pendingFiles.slice();
+    }
+    d.updates = d.updates || [];
+    d.updates.unshift(upd);
+    d.updatedAt = new Date().toISOString();
+    pendingFiles = [];
+    await persistTarefa(d);
+    openDrawer(id);
+    toast("Atualização adicionada", "ok");
+    if (currentScreen === "gestao") renderList();
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "Adicionar atualização"; }
+  }
 }
-function saveCurrent() {
+async function saveCurrent() {
   if (!currentId) return;
   const d = DB.demands.find(x => x.id === currentId); if (!d) return;
   const oldStatus = d.status;
@@ -876,18 +1167,28 @@ function saveCurrent() {
   if (d.status === "concluido" && !d.real) d.real = today();
   if (oldStatus !== d.status) {
     d.updates = d.updates || [];
-    d.updates.unshift({ id: "u"+Date.now(), date: new Date().toISOString(), text: `Status alterado de "${statusLabel(oldStatus)}" para "${statusLabel(d.status)}"`, statusAtTime: d.status, attachments: [] });
+    const upd = { id: "u"+Date.now(), date: new Date().toISOString(), text: `Status alterado de "${statusLabel(oldStatus)}" para "${statusLabel(d.status)}"`, statusAtTime: d.status, attachments: [] };
+    if (onlineMode) {
+      try {
+        const row = await sbInsertAtualizacao(d.id, upd);
+        upd.id = row.id;
+      } catch (e) { console.warn(e); }
+    }
+    d.updates.unshift(upd);
   }
-  saveDB(); closeDrawer();
+  await persistTarefa(d);
+  closeDrawer();
   if (currentScreen === "gestao") renderList();
   if (currentScreen === "dash") renderDash();
   toast("Tarefa salva", "ok");
 }
-function deleteCurrent() {
+async function deleteCurrent() {
   if (!currentId) return;
   if (!confirm("Excluir esta tarefa? O ID não será reutilizado.")) return;
-  DB.demands = DB.demands.filter(x => x.id !== currentId);
-  saveDB(); closeDrawer();
+  const id = currentId;
+  DB.demands = DB.demands.filter(x => x.id !== id);
+  await persistDelete(id);
+  closeDrawer();
   if (currentScreen === "gestao") renderList();
   if (currentScreen === "dash") renderDash();
   toast("Tarefa excluída", "ok");
@@ -907,19 +1208,46 @@ function openCreate() {
   </div>`;
   $("#modalBg").classList.add("on");
 }
-function createDemand() {
+async function createDemand() {
   const desc = ($("#c_desc").value || "").trim();
   if (!desc) { toast("Informe a descrição", "err"); return; }
-  const id = genId(); const now = new Date().toISOString();
-  const d = {
-    id, descricao: desc, responsavel: ($("#c_resp").value || "").trim(), solicitante: ($("#c_sol").value || "").trim(),
-    area: $("#c_area").value || "", prioridade: $("#c_prio").value, inicio: $("#c_inicio").value || today(),
-    previsto: $("#c_previsto").value || null, real: null, status: $("#c_status").value,
-    createdAt: now, updatedAt: now,
-    updates: [{ id: "u"+Date.now(), date: now, text: "Tarefa criada", statusAtTime: $("#c_status").value, attachments: [] }]
-  };
-  DB.demands.unshift(d); saveDB(); $("#modalBg").classList.remove("on");
-  renderList(); toast("Tarefa " + id + " criada", "ok"); openDrawer(id);
+  const btn = $("#btnCreate");
+  if (btn) { btn.disabled = true; btn.textContent = "Salvando…"; }
+  try {
+    const id = await genId();
+    const now = new Date().toISOString();
+    const statusVal = $("#c_status").value;
+    const d = {
+      id, descricao: desc, responsavel: ($("#c_resp").value || "").trim(), solicitante: ($("#c_sol").value || "").trim(),
+      area: $("#c_area").value || "", prioridade: $("#c_prio").value, inicio: $("#c_inicio").value || today(),
+      previsto: $("#c_previsto").value || null, real: null, status: statusVal,
+      createdAt: now, updatedAt: now,
+      updates: []
+    };
+    await persistTarefa(d);
+    // first update
+    const updLocal = { id: null, date: now, text: "Tarefa criada", statusAtTime: statusVal, attachments: [] };
+    if (onlineMode) {
+      try {
+        const row = await sbInsertAtualizacao(id, updLocal);
+        updLocal.id = row.id;
+      } catch (e) { console.warn(e); updLocal.id = "u" + Date.now(); }
+    } else {
+      updLocal.id = "u" + Date.now();
+    }
+    d.updates = [updLocal];
+    DB.demands.unshift(d);
+    saveLocal();
+    $("#modalBg").classList.remove("on");
+    renderList();
+    toast("Tarefa " + id + " criada", "ok");
+    openDrawer(id);
+  } catch (e) {
+    console.error(e);
+    toast("Erro ao criar tarefa", "err");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "Criar Tarefa"; }
+  }
 }
 
 function hexToRgb(hex) { const h = hex.replace("#",""); return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)]; }
@@ -1147,8 +1475,11 @@ function init() {
     $("#guiaLogo").style.display = "none";
     $("#logoImg").style.display = "none";
   }
-  loadDB();
   populateAreaSelects();
+  loadDB().then(() => {
+    if (currentScreen === "gestao") renderList();
+    if (currentScreen === "dash") renderDash();
+  });
 
   $("#cardDash").onclick = showDash;
   $("#cardGestao").onclick = showGestao;
