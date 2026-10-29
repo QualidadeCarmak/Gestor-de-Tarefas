@@ -1773,7 +1773,7 @@ function exportPdfDashboardWithRange(rangeFrom, rangeTo) {
   // Title line in clone
   const titleEl = topClone.querySelector(".title");
   if (titleEl) {
-    titleEl.innerHTML = 'Action Hub Qualidade<small>Carmak · Relatório de Dashboard · ' + fmtDate(rangeFrom) + ' a ' + fmtDate(rangeTo) + '</small>';
+    titleEl.innerHTML = 'Action Hub Qualidade<small>Carmak · Relatório de Dashboard</small>';
   }
 
   const dashClone = dash.cloneNode(true);
@@ -1784,7 +1784,34 @@ function exportPdfDashboardWithRange(rangeFrom, rangeTo) {
   dashClone.style.minHeight = "auto";
   dashClone.style.position = "relative";
 
+  // Spacing polish for PDF capture
+  topClone.style.borderBottom = "3px solid #D4B56A";
+  topClone.style.boxShadow = "none";
+
+  const dashMain = dashClone.querySelector(".main");
+  if (dashMain) {
+    dashMain.style.paddingTop = "18px";
+    dashMain.style.paddingBottom = "28px";
+  }
+  const ban = dashClone.querySelector("#pdfPeriodBanner");
+  if (ban) {
+    ban.style.margin = "0 auto 16px";
+    ban.style.maxWidth = "1280px";
+  }
+  // KPI row breathing room
+  const kpiRow = dashClone.querySelector(".dash-kpi-row");
+  if (kpiRow) kpiRow.style.marginBottom = "18px";
+  // panels gap
+  dashClone.querySelectorAll(".dash-grid2").forEach((g, i) => {
+    g.style.marginBottom = "16px";
+    if (i === 0) g.style.marginTop = "4px";
+  });
+
   wrap.appendChild(topClone);
+  // spacer between topbar and dashboard content
+  const spacer = document.createElement("div");
+  spacer.style.cssText = "height:10px;background:linear-gradient(180deg,#061220,#0C2340);width:100%;";
+  wrap.appendChild(spacer);
   wrap.appendChild(dashClone);
   document.body.appendChild(wrap);
 
