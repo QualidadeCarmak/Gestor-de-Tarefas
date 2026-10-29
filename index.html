@@ -384,6 +384,19 @@ table.demands tr.aguardando td { background: #FFFBEB !important; }
 .dropzone .dz-sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
 .dropzone input[type=file] { display: none; }
 
+/* Report period modal */
+#reportModal .modal { max-width: 440px; }
+.report-presets { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 16px; }
+.report-presets button {
+  appearance: none; border: 1px solid var(--line); background: #fff; border-radius: 8px;
+  padding: 8px 12px; font-size: 12px; font-weight: 600; color: var(--ink-2); cursor: pointer;
+}
+.report-presets button:hover, .report-presets button.on {
+  border-color: var(--accent); background: rgba(212,181,106,.12); color: var(--navy);
+}
+.report-dates { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+
 
 .modal-bg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 300; align-items: center; justify-content: center; padding: 1rem; }
 .modal-bg.on { display: flex; }
@@ -692,6 +705,31 @@ table.demands tr.aguardando td { background: #FFFBEB !important; }
     <div class="modal-actions">
       <button type="button" class="btn btn-s" id="btnCancelCreate">Cancelar</button>
       <button type="button" class="btn btn-g" id="btnCreate">Criar Tarefa</button>
+    </div>
+  </div>
+</div>
+
+
+<div class="modal-bg" id="reportModal">
+  <div class="modal">
+    <div class="modal-head"><h2>Gerar relatório PDF</h2></div>
+    <div class="modal-body">
+      <p class="muted text-sm" style="margin-bottom:8px">Escolha o período. Os indicadores e gráficos serão calculados com base nele.</p>
+      <div class="report-presets" id="reportPresets">
+        <button type="button" data-preset="mes">Este mês</button>
+        <button type="button" data-preset="3m">Últimos 3 meses</button>
+        <button type="button" data-preset="6m" class="on">Últimos 6 meses</button>
+        <button type="button" data-preset="ano">Este ano</button>
+        <button type="button" data-preset="tudo">Todo o período</button>
+      </div>
+      <div class="report-dates">
+        <div class="form-field"><label>De</label><input type="date" id="reportFrom"></div>
+        <div class="form-field"><label>Até</label><input type="date" id="reportTo"></div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-s" id="btnReportCancel">Cancelar</button>
+      <button type="button" class="btn btn-g" id="btnReportGo">Gerar PDF</button>
     </div>
   </div>
 </div>
@@ -1015,10 +1053,35 @@ function openGestaoVencidas() {
   toast("Filtrando tarefas vencidas", "ok");
 }
 
-function getMetrics() {
-  const now = today(); const thisMonth = now.slice(0, 7); const demands = DB.demands;
+function getMetrics(rangeFrom, rangeTo) {
+  const now = today();
+  const thisMonth = now.slice(0, 7);
+  let demands = DB.demands.slice();
+
+  // Optional period filter (inclusive dates YYYY-MM-DD)
+  const hasRange = !!(rangeFrom && rangeTo);
+  if (hasRange) {
+    const from = rangeFrom.slice(0, 10);
+    const to = rangeTo.slice(0, 10);
+    demands = demands.filter(d => {
+      const created = (d.createdAt || d.inicio || "").toString().slice(0, 10);
+      const real = (d.real || "").toString().slice(0, 10);
+      const previsto = (d.previsto || "").toString().slice(0, 10);
+      const open = !["concluido", "cancelado"].includes(d.status);
+      // in period if created, completed, or still open and created/started before end
+      if (created && created >= from && created <= to) return true;
+      if (real && real >= from && real <= to) return true;
+      if (open && created && created <= to) return true;
+      if (previsto && previsto >= from && previsto <= to) return true;
+      return false;
+    });
+  }
+
   const abertas = demands.filter(d => !["concluido","cancelado"].includes(d.status));
-  const finalMes = demands.filter(d => d.status === "concluido" && d.real && String(d.real).slice(0,7) === thisMonth);
+  // Finalizadas: no mês atual se sem range; no período se com range
+  const finalMes = hasRange
+    ? demands.filter(d => d.status === "concluido" && d.real && d.real.slice(0,10) >= rangeFrom.slice(0,10) && d.real.slice(0,10) <= rangeTo.slice(0,10))
+    : demands.filter(d => d.status === "concluido" && d.real && String(d.real).slice(0,7) === thisMonth);
   const abertas1m = abertas.filter(d => { const ref = d.inicio || d.createdAt; return ref && daysBetween(ref, now) > 30; });
   const aguardando = demands.filter(d => d.status === "aguardando_retorno");
   const emExec = demands.filter(d => d.status === "em_execucao");
@@ -1037,18 +1100,37 @@ function getMetrics() {
   demands.forEach(d => { const r = (d.responsavel || "—").trim() || "—"; if (!byResp[r]) byResp[r] = { total: 0, done: 0 }; byResp[r].total++; if (d.status === "concluido") byResp[r].done++; });
   const byArea = {};
   demands.forEach(d => { const a = d.area || "—"; byArea[a] = (byArea[a] || 0) + 1; });
+
+  // Monthly evolution: 6 months default, or months spanning range
   const months = [];
-  const d0 = new Date();
-  for (let i = 5; i >= 0; i--) {
-    const dt = new Date(d0.getFullYear(), d0.getMonth() - i, 1);
-    const key = dt.toISOString().slice(0, 7);
-    const label = dt.toLocaleDateString("pt-BR", { month: "short", year: "2-digit" });
-    const done = demands.filter(d => d.status === "concluido" && d.real && String(d.real).slice(0,7) === key).length;
-    const opened = demands.filter(d => { const c = d.createdAt || d.inicio; return c && String(c).slice(0,7) === key; }).length;
-    months.push({ key, label, done, opened });
+  if (hasRange) {
+    const start = new Date(rangeFrom.slice(0,7) + "-01T12:00:00");
+    const end = new Date(rangeTo.slice(0,7) + "-01T12:00:00");
+    let cur = new Date(start);
+    let guard = 0;
+    while (cur <= end && guard < 24) {
+      const key = cur.toISOString().slice(0, 7);
+      const label = cur.toLocaleDateString("pt-BR", { month: "short", year: "2-digit" });
+      const done = DB.demands.filter(d => d.status === "concluido" && d.real && String(d.real).slice(0,7) === key).length;
+      const opened = DB.demands.filter(d => { const c = d.createdAt || d.inicio; return c && String(c).slice(0,7) === key; }).length;
+      months.push({ key, label, done, opened });
+      cur.setMonth(cur.getMonth() + 1);
+      guard++;
+    }
+  } else {
+    const d0 = new Date();
+    for (let i = 5; i >= 0; i--) {
+      const dt = new Date(d0.getFullYear(), d0.getMonth() - i, 1);
+      const key = dt.toISOString().slice(0, 7);
+      const label = dt.toLocaleDateString("pt-BR", { month: "short", year: "2-digit" });
+      const done = DB.demands.filter(d => d.status === "concluido" && d.real && String(d.real).slice(0,7) === key).length;
+      const opened = DB.demands.filter(d => { const c = d.createdAt || d.inicio; return c && String(c).slice(0,7) === key; }).length;
+      months.push({ key, label, done, opened });
+    }
   }
+
   const byStatus = { nao_iniciado: naoIni.length, em_execucao: emExec.length, aguardando_retorno: aguardando.length, concluido: concluidos.length, cancelado: cancelados.length };
-  return { total: demands.length, abertas: abertas.length, finalMes: finalMes.length, abertas1m: abertas1m.length, aguardando: aguardando.length, emExec: emExec.length, vencidas: vencidas.length, vence7: vence7.length, pctPrazo, tempoMedio, byResp, byArea, months, byStatus };
+  return { total: demands.length, abertas: abertas.length, finalMes: finalMes.length, abertas1m: abertas1m.length, aguardando: aguardando.length, emExec: emExec.length, vencidas: vencidas.length, vence7: vence7.length, pctPrazo, tempoMedio, byResp, byArea, months, byStatus, rangeFrom: rangeFrom || null, rangeTo: rangeTo || null };
 }
 
 
@@ -1588,140 +1670,160 @@ async function createDemand() {
 
 function hexToRgb(hex) { const h = hex.replace("#",""); return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)]; }
 
+
+function openReportModal() {
+  const now = new Date();
+  const to = now.toISOString().slice(0, 10);
+  const from6 = new Date(now.getFullYear(), now.getMonth() - 5, 1).toISOString().slice(0, 10);
+  $("#reportFrom").value = from6;
+  $("#reportTo").value = to;
+  document.querySelectorAll("#reportPresets button").forEach(b => b.classList.toggle("on", b.getAttribute("data-preset") === "6m"));
+  $("#reportModal").classList.add("on");
+}
+
+function applyReportPreset(preset) {
+  const now = new Date();
+  const to = now.toISOString().slice(0, 10);
+  let from = to;
+  if (preset === "mes") {
+    from = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+  } else if (preset === "3m") {
+    from = new Date(now.getFullYear(), now.getMonth() - 2, 1).toISOString().slice(0, 10);
+  } else if (preset === "6m") {
+    from = new Date(now.getFullYear(), now.getMonth() - 5, 1).toISOString().slice(0, 10);
+  } else if (preset === "ano") {
+    from = new Date(now.getFullYear(), 0, 1).toISOString().slice(0, 10);
+  } else if (preset === "tudo") {
+    from = "2020-01-01";
+  }
+  $("#reportFrom").value = from;
+  $("#reportTo").value = to;
+  document.querySelectorAll("#reportPresets button").forEach(b => b.classList.toggle("on", b.getAttribute("data-preset") === preset));
+}
+
 function exportPdfDashboard() {
+  openReportModal();
+}
+
+function exportPdfDashboardWithRange(rangeFrom, rangeTo) {
   const JS = window.jspdf && window.jspdf.jsPDF;
   if (!JS) { toast("jsPDF não carregou", "err"); return; }
   const doc = new JS({ orientation: "landscape", unit: "mm", format: "a4" });
   const navy = hexToRgb("#0C2340");
   const gold = hexToRgb("#D4B56A");
-  const m = getMetrics();
+  const m = getMetrics(rangeFrom, rangeTo);
   const now = new Date().toLocaleString("pt-BR");
   const pageW = 297;
   const pageH = 210;
 
-  // Full sapphire background (like dashboard)
+  // Background sapphire
   doc.setFillColor(navy[0], navy[1], navy[2]);
   doc.rect(0, 0, pageW, pageH, "F");
-  // Header bar
   doc.setFillColor(6, 18, 32);
-  doc.rect(0, 0, pageW, 18, "F");
+  doc.rect(0, 0, pageW, 16, "F");
   doc.setFillColor(gold[0], gold[1], gold[2]);
-  doc.rect(0, 18, pageW, 1.5, "F");
+  doc.rect(0, 16, pageW, 1.4, "F");
 
   doc.setTextColor(255, 255, 255);
   doc.setFont("helvetica", "bold");
   doc.setFontSize(12);
-  doc.text("Action Hub Qualidade · Dashboard", 12, 11);
+  doc.text("Action Hub Qualidade · Dashboard", 12, 10);
   doc.setFont("helvetica", "normal");
-  doc.setFontSize(8);
+  doc.setFontSize(7.5);
   doc.setTextColor(232, 213, 163);
-  doc.text("Carmak · Uso interno", 12, 15.5);
+  const periodoLabel = (rangeFrom && rangeTo)
+    ? ("Período: " + fmtDate(rangeFrom) + " a " + fmtDate(rangeTo))
+    : "Período: completo";
+  doc.text("Carmak · Uso interno  ·  " + periodoLabel, 12, 14);
   doc.setTextColor(180, 195, 210);
-  doc.text(now, pageW - 12, 12, { align: "right" });
+  doc.text(now, pageW - 12, 10.5, { align: "right" });
 
-  // --- KPI cards row (like dashboard) ---
+  // KPI row
   const kpis = [
-    { l: "Finalizadas no mês", v: String(m.finalMes), accent: true },
+    { l: "Finalizadas", v: String(m.finalMes), accent: true },
     { l: "Abertas > 1 mês", v: String(m.abertas1m) },
-    { l: "Aguardando Retorno", v: String(m.aguardando) },
+    { l: "Aguardando", v: String(m.aguardando) },
     { l: "Vencidas", v: String(m.vencidas), bad: true },
-    { l: "Vencem em 7 dias", v: String(m.vence7) },
+    { l: "Vencem 7 dias", v: String(m.vence7) },
     { l: "% no prazo", v: m.pctPrazo != null ? m.pctPrazo + "%" : "—" },
-    { l: "Em execução", v: String(m.emExec) }
+    { l: "Em execução", v: String(m.emExec) },
+    { l: "Tempo médio", v: m.tempoMedio != null ? m.tempoMedio + "d" : "—" }
   ];
-  const cardW = 36, cardH = 22, gap = 4;
-  let x0 = 12;
+  const cardW = 33, cardH = 20, gap = 3.2;
   const totalCardsW = kpis.length * cardW + (kpis.length - 1) * gap;
-  x0 = (pageW - totalCardsW) / 2;
+  let x0 = (pageW - totalCardsW) / 2;
   kpis.forEach((k, i) => {
     const x = x0 + i * (cardW + gap);
-    const y = 24;
-    doc.setFillColor(18, 48, 78);
-    doc.setDrawColor(k.bad ? 200 : (k.accent ? 212 : 40), k.bad ? 80 : (k.accent ? 181 : 70), k.bad ? 70 : (k.accent ? 106 : 100));
-    doc.setLineWidth(0.4);
-    doc.roundedRect(x, y, cardW, cardH, 2.5, 2.5, "FD");
-    // left accent bar
+    const y = 21;
+    doc.setFillColor(16, 42, 70);
+    if (k.bad) doc.setDrawColor(200, 80, 70);
+    else if (k.accent) doc.setDrawColor(212, 181, 106);
+    else doc.setDrawColor(50, 80, 110);
+    doc.setLineWidth(0.45);
+    doc.roundedRect(x, y, cardW, cardH, 2.2, 2.2, "FD");
     if (k.bad) doc.setFillColor(200, 70, 60);
     else if (k.accent) doc.setFillColor(212, 181, 106);
     else doc.setFillColor(212, 181, 106);
-    doc.rect(x, y + 2, 1.2, cardH - 4, "F");
+    doc.rect(x, y + 2.5, 1.3, cardH - 5, "F");
     doc.setFont("helvetica", "normal");
-    doc.setFontSize(5.5);
-    doc.setTextColor(160, 180, 200);
+    doc.setFontSize(5.2);
+    doc.setTextColor(150, 175, 195);
     doc.text(k.l.toUpperCase(), x + 4, y + 6);
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(14);
+    doc.setFontSize(13);
     if (k.accent) doc.setTextColor(212, 181, 106);
     else if (k.bad) doc.setTextColor(255, 140, 130);
     else doc.setTextColor(255, 255, 255);
-    doc.text(k.v, x + 4, y + 15);
+    doc.text(k.v, x + 4, y + 14);
   });
 
-  // Tempo médio destaque
-  const tempoStr = m.tempoMedio != null ? m.tempoMedio + " dias" : "—";
-  doc.setFillColor(18, 48, 78);
-  doc.setDrawColor(212, 181, 106);
-  doc.setLineWidth(0.5);
-  doc.roundedRect(12, 49, 80, 14, 2, 2, "FD");
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(8);
-  doc.setTextColor(212, 181, 106);
-  doc.text("Tempo médio de entrega", 16, 55);
-  doc.setFontSize(12);
-  doc.setTextColor(255, 255, 255);
-  doc.text(tempoStr, 16, 60.5);
-
-  // --- Bottom panels ---
-  const panelY = 68;
-  const panelH = 125;
-  const panelGap = 6;
-  const panelW = (pageW - 24 - panelGap) / 2;
-
   function panelBox(x, y, w, h, title) {
-    doc.setFillColor(14, 40, 68);
-    doc.setDrawColor(40, 70, 100);
-    doc.setLineWidth(0.3);
+    doc.setFillColor(12, 36, 62);
+    doc.setDrawColor(45, 75, 105);
+    doc.setLineWidth(0.35);
     doc.roundedRect(x, y, w, h, 3, 3, "FD");
     doc.setFont("helvetica", "bold");
     doc.setFontSize(9);
     doc.setTextColor(212, 181, 106);
-    doc.text(title, x + 5, y + 8);
+    doc.text(title, x + 5, y + 7);
   }
 
-  // Panel 1: Evolução mensal (column chart style)
+  const panelY = 46;
+  const panelH = 148;
+  const panelGap = 6;
+  const panelW = (pageW - 24 - panelGap) / 2;
+
+  // --- Evolução mensal (column chart like dashboard) ---
   panelBox(12, panelY, panelW, panelH, "Evolução mensal");
   const maxM = Math.max(1, ...m.months.map(mo => Math.max(mo.done, mo.opened)));
-  const chartLeft = 22;
-  const chartBottom = panelY + panelH - 22;
-  const chartTop = panelY + 16;
+  const chartLeft = 20;
+  const chartBottom = panelY + panelH - 18;
+  const chartTop = panelY + 14;
   const chartH = chartBottom - chartTop;
-  const nMo = m.months.length;
-  const groupW = (panelW - 30) / nMo;
+  const nMo = Math.max(1, m.months.length);
+  const groupW = (panelW - 28) / nMo;
   m.months.forEach((mo, i) => {
     const cx = chartLeft + i * groupW + groupW / 2;
-    const hDone = (mo.done / maxM) * (chartH - 4);
-    const hOpen = (mo.opened / maxM) * (chartH - 4);
-    const barW = 5;
-    // open (blue) behind/side
+    const hDone = (mo.done / maxM) * (chartH - 6);
+    const hOpen = (mo.opened / maxM) * (chartH - 6);
+    const barW = Math.min(7, groupW * 0.32);
     doc.setFillColor(91, 155, 213);
-    doc.roundedRect(cx - barW - 1, chartBottom - Math.max(1.5, hOpen), barW, Math.max(1.5, hOpen), 0.8, 0.8, "F");
-    // done (green)
+    doc.roundedRect(cx - barW - 1.2, chartBottom - Math.max(1.2, hOpen), barW, Math.max(1.2, hOpen), 0.7, 0.7, "F");
     doc.setFillColor(60, 184, 120);
-    doc.roundedRect(cx + 1, chartBottom - Math.max(1.5, hDone), barW, Math.max(1.5, hDone), 0.8, 0.8, "F");
+    doc.roundedRect(cx + 1.2, chartBottom - Math.max(1.2, hDone), barW, Math.max(1.2, hDone), 0.7, 0.7, "F");
     doc.setFont("helvetica", "normal");
-    doc.setFontSize(6);
-    doc.setTextColor(160, 180, 200);
-    doc.text(mo.label.replace(" de ", "/"), cx, chartBottom + 5, { align: "center" });
+    doc.setFontSize(5.5);
+    doc.setTextColor(150, 175, 195);
+    doc.text(mo.label.replace(" de ", "/"), cx, chartBottom + 4.5, { align: "center" });
   });
-  // legend
-  doc.setFillColor(60, 184, 120); doc.roundedRect(22, panelY + panelH - 10, 3.5, 3.5, 0.5, 0.5, "F");
-  doc.setFontSize(6.5); doc.setTextColor(180, 200, 215); doc.text("Concluídas", 27, panelY + panelH - 7.5);
-  doc.setFillColor(91, 155, 213); doc.roundedRect(55, panelY + panelH - 10, 3.5, 3.5, 0.5, 0.5, "F");
-  doc.text("Abertas no mês", 60, panelY + panelH - 7.5);
+  doc.setFillColor(60, 184, 120); doc.roundedRect(18, panelY + panelH - 8, 3.2, 3.2, 0.4, 0.4, "F");
+  doc.setFontSize(6); doc.setTextColor(180, 200, 215); doc.text("Concluídas", 23, panelY + panelH - 5.5);
+  doc.setFillColor(91, 155, 213); doc.roundedRect(52, panelY + panelH - 8, 3.2, 3.2, 0.4, 0.4, "F");
+  doc.text("Abertas no mês", 57, panelY + panelH - 5.5);
 
-  // Panel 2: Status distribution (simple bars as proxy for donut)
+  // --- Status horizontal bars (dashboard-like) ---
   const px2 = 12 + panelW + panelGap;
-  panelBox(px2, panelY, panelW, panelH * 0.48, "Distribuição por status");
+  panelBox(px2, panelY, panelW, panelH * 0.42, "Distribuição por status");
   const stList = [
     { l: "Não iniciado", n: m.byStatus.nao_iniciado, c: [107, 114, 128] },
     { l: "Em execução", n: m.byStatus.em_execucao, c: [66, 165, 245] },
@@ -1731,76 +1833,78 @@ function exportPdfDashboard() {
   ];
   const maxSt = Math.max(1, ...stList.map(s => s.n));
   stList.forEach((s, i) => {
-    const sy = panelY + 14 + i * 10;
+    const sy = panelY + 12 + i * 9.5;
     doc.setFont("helvetica", "normal");
     doc.setFontSize(7);
     doc.setTextColor(200, 215, 230);
     doc.text(s.l, px2 + 6, sy + 3);
-    const bw = Math.max(2, (s.n / maxSt) * 55);
+    const bw = Math.max(2, (s.n / maxSt) * 58);
     doc.setFillColor(s.c[0], s.c[1], s.c[2]);
-    doc.roundedRect(px2 + 55, sy, bw, 4, 1, 1, "F");
+    doc.roundedRect(px2 + 52, sy, bw, 4.2, 1, 1, "F");
     doc.setTextColor(255, 255, 255);
-    doc.text(String(s.n), px2 + panelW - 10, sy + 3.2, { align: "right" });
+    doc.setFont("helvetica", "bold");
+    doc.text(String(s.n), px2 + panelW - 8, sy + 3.3, { align: "right" });
   });
 
-  // Panel 3: Produtividade por responsável
-  const py3 = panelY + panelH * 0.48 + 5;
-  const ph3 = panelH * 0.48 - 5;
-  panelBox(px2, py3, panelW / 2 - 2, ph3, "Por responsável");
+  // --- Responsável + Área ---
+  const py3 = panelY + panelH * 0.42 + 5;
+  const ph3 = panelH * 0.58 - 5;
+  panelBox(px2, py3, panelW / 2 - 2.5, ph3, "Por responsável");
   const respEntries = Object.entries(m.byResp)
     .map(([name, v]) => ({ name, done: v.done, total: v.total }))
-    .sort((a, b) => b.done - a.done).slice(0, 6);
+    .sort((a, b) => b.done - a.done || b.total - a.total).slice(0, 7);
   if (!respEntries.length) {
     doc.setFont("helvetica", "italic"); doc.setFontSize(7); doc.setTextColor(150, 170, 190);
-    doc.text("Sem dados", px2 + 6, py3 + 20);
+    doc.text("Sem dados", px2 + 6, py3 + 18);
   } else {
-    const maxR = Math.max(1, ...respEntries.map(r => r.done));
+    const maxR = Math.max(1, ...respEntries.map(r => r.total));
     respEntries.forEach((r, i) => {
-      const ry = py3 + 14 + i * 9;
-      doc.setFontSize(6.5); doc.setTextColor(200, 215, 230);
+      const ry = py3 + 12 + i * 9;
+      doc.setFont("helvetica", "normal"); doc.setFontSize(6.5); doc.setTextColor(200, 215, 230);
       doc.text(r.name.slice(0, 14), px2 + 5, ry + 2.5);
-      const bw = Math.max(1.5, (r.done / maxR) * 40);
+      const bw = Math.max(1.5, (r.total / maxR) * 42);
       doc.setFillColor(30, 70, 110);
-      doc.roundedRect(px2 + 42, ry, bw, 3.5, 0.8, 0.8, "F");
+      doc.roundedRect(px2 + 40, ry, bw, 3.8, 0.8, 0.8, "F");
       doc.setFillColor(212, 181, 106);
-      doc.roundedRect(px2 + 42, ry, Math.min(bw, Math.max(2, bw * 0.4)), 3.5, 0.8, 0.8, "F");
+      const doneW = r.total ? (r.done / r.total) * bw : 0;
+      if (doneW > 0.5) doc.roundedRect(px2 + 40, ry, doneW, 3.8, 0.8, 0.8, "F");
       doc.setTextColor(220, 230, 240);
-      doc.text(String(r.done), px2 + panelW / 2 - 8, ry + 2.8, { align: "right" });
+      doc.text(String(r.done) + "/" + r.total, px2 + panelW / 2 - 6, ry + 2.8, { align: "right" });
     });
   }
 
-  // Panel 4: Por área
-  panelBox(px2 + panelW / 2 + 2, py3, panelW / 2 - 2, ph3, "Por área");
-  const areaEntries = Object.entries(m.byArea).map(([name, n]) => ({ name, n })).sort((a, b) => b.n - a.n).slice(0, 6);
+  panelBox(px2 + panelW / 2 + 2.5, py3, panelW / 2 - 2.5, ph3, "Por área");
+  const areaEntries = Object.entries(m.byArea).map(([name, n]) => ({ name, n })).sort((a, b) => b.n - a.n).slice(0, 7);
+  const ax = px2 + panelW / 2 + 2.5;
   if (!areaEntries.length) {
     doc.setFont("helvetica", "italic"); doc.setFontSize(7); doc.setTextColor(150, 170, 190);
-    doc.text("Sem dados", px2 + panelW / 2 + 8, py3 + 20);
+    doc.text("Sem dados", ax + 6, py3 + 18);
   } else {
     const maxA = Math.max(1, ...areaEntries.map(r => r.n));
-    const ax = px2 + panelW / 2 + 2;
     areaEntries.forEach((r, i) => {
-      const ry = py3 + 14 + i * 9;
-      doc.setFontSize(6.5); doc.setTextColor(200, 215, 230);
+      const ry = py3 + 12 + i * 9;
+      doc.setFont("helvetica", "normal"); doc.setFontSize(6.5); doc.setTextColor(200, 215, 230);
       doc.text(r.name.slice(0, 12), ax + 5, ry + 2.5);
-      const bw = Math.max(1.5, (r.n / maxA) * 38);
+      const bw = Math.max(1.5, (r.n / maxA) * 40);
       doc.setFillColor(30, 70, 110);
-      doc.roundedRect(ax + 40, ry, bw, 3.5, 0.8, 0.8, "F");
+      doc.roundedRect(ax + 38, ry, bw, 3.8, 0.8, 0.8, "F");
       doc.setFillColor(60, 184, 120);
-      doc.roundedRect(ax + 40 + bw - Math.min(4, bw), ry, Math.min(4, bw), 3.5, 0.5, 0.5, "F");
+      doc.roundedRect(ax + 38 + Math.max(0, bw - 4), ry, Math.min(4, bw), 3.8, 0.5, 0.5, "F");
       doc.setTextColor(220, 230, 240);
-      doc.text(String(r.n), ax + panelW / 2 - 10, ry + 2.8, { align: "right" });
+      doc.text(String(r.n), ax + panelW / 2 - 8, ry + 2.8, { align: "right" });
     });
   }
 
-  // Footer
   doc.setFontSize(6.5);
   doc.setTextColor(130, 150, 170);
   doc.text("SGQ Carmak · Action Hub Qualidade · Gerado automaticamente", 12, pageH - 5);
   doc.text("Página 1 de 1", pageW - 12, pageH - 5, { align: "right" });
 
-  doc.save("ActionHub_Dashboard_" + today() + ".pdf");
+  const fname = "ActionHub_Dashboard_" + (rangeFrom || today()).slice(0, 10) + "_" + (rangeTo || today()).slice(0, 10) + ".pdf";
+  doc.save(fname);
   toast("PDF gerado", "ok");
 }
+
 
 function init() {
   if (LOGO_B64) {
@@ -1822,6 +1926,20 @@ function init() {
   $("#btnBackGuia").onclick = showGuia;
   $("#btnNew").onclick = openCreate;
   $("#btnPdfDash").onclick = exportPdfDashboard;
+  $("#btnReportCancel").onclick = () => $("#reportModal").classList.remove("on");
+  $("#btnReportGo").onclick = () => {
+    const from = $("#reportFrom").value;
+    const to = $("#reportTo").value;
+    if (!from || !to) { toast("Informe o período", "err"); return; }
+    if (from > to) { toast("Data inicial maior que a final", "err"); return; }
+    $("#reportModal").classList.remove("on");
+    exportPdfDashboardWithRange(from, to);
+  };
+  document.querySelectorAll("#reportPresets button").forEach(b => {
+    b.onclick = () => applyReportPreset(b.getAttribute("data-preset"));
+  });
+  // Don't close report modal on outside click either - only buttons
+
 
   $("#btnCancelCreate").onclick = () => $("#modalBg").classList.remove("on");
   $("#btnCreate").onclick = createDemand;
