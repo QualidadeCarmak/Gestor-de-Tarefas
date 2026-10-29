@@ -365,6 +365,26 @@ table.demands tr.aguardando td { background: #FFFBEB !important; }
 .file-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 4px 8px; border-radius: 6px; background: #fff; border: 1px solid var(--line); }
 .file-chip button { appearance: none; border: none; background: none; color: var(--bad); cursor: pointer; font-size: 14px; line-height: 1; }
 
+.dropzone {
+  border: 2px dashed var(--line);
+  border-radius: 12px;
+  background: #fff;
+  padding: 18px 14px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+  margin-top: 8px;
+}
+.dropzone:hover, .dropzone.dragover {
+  border-color: var(--accent);
+  background: rgba(212,181,106,.08);
+}
+.dropzone .dz-icon { font-size: 22px; margin-bottom: 6px; opacity: .7; }
+.dropzone .dz-title { font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.dropzone .dz-sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.dropzone input[type=file] { display: none; }
+
+
 .modal-bg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 300; align-items: center; justify-content: center; padding: 1rem; }
 .modal-bg.on { display: flex; }
 .modal { background: var(--card); border-radius: 16px; max-width: 640px; width: 100%; max-height: 92vh; overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,.3); display: flex; flex-direction: column; }
@@ -1357,7 +1377,15 @@ function renderDrawerForm(d) {
   <div class="timeline"><h4>📝 Atualizações</h4>${tlHtml}</div>
   <div class="new-update"><h5>Nova atualização</h5>
     <div class="form-field"><textarea id="u_text" rows="2" placeholder="O que aconteceu / o que falta…"></textarea></div>
-    <div class="mt-8"><input type="file" id="u_files" multiple accept="*/*" style="font-size:12px"><div class="muted text-sm mt-8">Máx. 3 arquivos por atualização</div><div class="file-list" id="u_fileList"></div></div>
+    <div class="mt-8">
+      <div class="dropzone" id="u_dropzone" tabindex="0" role="button" aria-label="Anexar arquivos">
+        <div class="dz-icon">📎</div>
+        <div class="dz-title">Arraste arquivos aqui</div>
+        <div class="dz-sub">ou clique para escolher · máx. 3 por atualização</div>
+        <input type="file" id="u_files" multiple accept="*/*">
+      </div>
+      <div class="file-list" id="u_fileList"></div>
+    </div>
     <div class="mt-12"><button type="button" class="btn btn-p btn-sm" id="btnAddUpdate">Adicionar atualização</button></div>
   </div>`;
 }
@@ -1375,17 +1403,35 @@ function bindDrawerEvents(d) {
       }
     };
   });
-  $("#u_files").onchange = (e) => {
-    const files = Array.from(e.target.files || []);
+
+  function handleFiles(fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
     if (pendingFiles.length + files.length > 3) { toast("Máximo 3 arquivos por atualização", "err"); return; }
     files.forEach(f => {
-      if (f.size > 4 * 1024 * 1024) { toast("Arquivo " + f.name + " muito grande (máx 4MB local)", "err"); return; }
+      if (f.size > 8 * 1024 * 1024) { toast("Arquivo " + f.name + " muito grande (máx 8MB)", "err"); return; }
       const reader = new FileReader();
       reader.onload = () => { pendingFiles.push({ name: f.name, size: f.size, type: f.type, dataUrl: reader.result }); renderPendingFiles(); };
       reader.readAsDataURL(f);
     });
-    e.target.value = "";
-  };
+  }
+
+  const dz = $("#u_dropzone");
+  const inp = $("#u_files");
+  if (dz && inp) {
+    dz.onclick = () => inp.click();
+    dz.ondragover = (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.add("dragover"); };
+    dz.ondragleave = (e) => { e.preventDefault(); dz.classList.remove("dragover"); };
+    dz.ondrop = (e) => {
+      e.preventDefault(); e.stopPropagation();
+      dz.classList.remove("dragover");
+      handleFiles(e.dataTransfer.files);
+    };
+    inp.onchange = (e) => {
+      handleFiles(e.target.files);
+      e.target.value = "";
+    };
+  }
 }
 function renderPendingFiles() {
   const el = $("#u_fileList"); if (!el) return;
