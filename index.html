@@ -7,6 +7,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.0/dist/umd/supabase.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
 <style>
 :root {
   --navy: #0C2340;
@@ -1054,6 +1055,9 @@ function openGestaoVencidas() {
 }
 
 function getMetrics(rangeFrom, rangeTo) {
+  if (window.__metricsOverride && rangeFrom === undefined && rangeTo === undefined) {
+    return window.__metricsOverride;
+  }
   const now = today();
   const thisMonth = now.slice(0, 7);
   let demands = DB.demands.slice();
@@ -1708,201 +1712,111 @@ function exportPdfDashboard() {
 function exportPdfDashboardWithRange(rangeFrom, rangeTo) {
   const JS = window.jspdf && window.jspdf.jsPDF;
   if (!JS) { toast("jsPDF não carregou", "err"); return; }
-  const doc = new JS({ orientation: "landscape", unit: "mm", format: "a4" });
-  const navy = hexToRgb("#0C2340");
-  const gold = hexToRgb("#D4B56A");
+  if (typeof html2canvas !== "function") { toast("html2canvas não carregou", "err"); return; }
+
   const m = getMetrics(rangeFrom, rangeTo);
-  const now = new Date().toLocaleString("pt-BR");
-  const pageW = 297;
-  const pageH = 210;
+  const dash = $("#screenDash");
+  const guia = $("#guia");
+  const gestao = $("#screenGestao");
+  const topbar = $("#topbar");
 
-  // Background sapphire
-  doc.setFillColor(navy[0], navy[1], navy[2]);
-  doc.rect(0, 0, pageW, pageH, "F");
-  doc.setFillColor(6, 18, 32);
-  doc.rect(0, 0, pageW, 16, "F");
-  doc.setFillColor(gold[0], gold[1], gold[2]);
-  doc.rect(0, 16, pageW, 1.4, "F");
+  // Remember UI state
+  const state = {
+    guia: guia.classList.contains("on"),
+    dash: dash.classList.contains("on"),
+    gestao: gestao.classList.contains("on"),
+    topbar: topbar.style.display,
+    topSub: $("#topSub").textContent,
+    anim: dash.classList.contains("anim")
+  };
 
-  doc.setTextColor(255, 255, 255);
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(12);
-  doc.text("Action Hub Qualidade · Dashboard", 12, 10);
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(7.5);
-  doc.setTextColor(232, 213, 163);
-  const periodoLabel = (rangeFrom && rangeTo)
-    ? ("Período: " + fmtDate(rangeFrom) + " a " + fmtDate(rangeTo))
-    : "Período: completo";
-  doc.text("Carmak · Uso interno  ·  " + periodoLabel, 12, 14);
-  doc.setTextColor(180, 195, 210);
-  doc.text(now, pageW - 12, 10.5, { align: "right" });
+  const btn = $("#btnReportGo");
+  if (btn) { btn.disabled = true; btn.textContent = "Gerando…"; }
+  toast("Montando relatório…", "ok");
 
-  // KPI row
-  const kpis = [
-    { l: "Finalizadas", v: String(m.finalMes), accent: true },
-    { l: "Abertas > 1 mês", v: String(m.abertas1m) },
-    { l: "Aguardando", v: String(m.aguardando) },
-    { l: "Vencidas", v: String(m.vencidas), bad: true },
-    { l: "Vencem 7 dias", v: String(m.vence7) },
-    { l: "% no prazo", v: m.pctPrazo != null ? m.pctPrazo + "%" : "—" },
-    { l: "Em execução", v: String(m.emExec) },
-    { l: "Tempo médio", v: m.tempoMedio != null ? m.tempoMedio + "d" : "—" }
-  ];
-  const cardW = 33, cardH = 20, gap = 3.2;
-  const totalCardsW = kpis.length * cardW + (kpis.length - 1) * gap;
-  let x0 = (pageW - totalCardsW) / 2;
-  kpis.forEach((k, i) => {
-    const x = x0 + i * (cardW + gap);
-    const y = 21;
-    doc.setFillColor(16, 42, 70);
-    if (k.bad) doc.setDrawColor(200, 80, 70);
-    else if (k.accent) doc.setDrawColor(212, 181, 106);
-    else doc.setDrawColor(50, 80, 110);
-    doc.setLineWidth(0.45);
-    doc.roundedRect(x, y, cardW, cardH, 2.2, 2.2, "FD");
-    if (k.bad) doc.setFillColor(200, 70, 60);
-    else if (k.accent) doc.setFillColor(212, 181, 106);
-    else doc.setFillColor(212, 181, 106);
-    doc.rect(x, y + 2.5, 1.3, cardH - 5, "F");
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(5.2);
-    doc.setTextColor(150, 175, 195);
-    doc.text(k.l.toUpperCase(), x + 4, y + 6);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(13);
-    if (k.accent) doc.setTextColor(212, 181, 106);
-    else if (k.bad) doc.setTextColor(255, 140, 130);
-    else doc.setTextColor(255, 255, 255);
-    doc.text(k.v, x + 4, y + 14);
-  });
+  // Show dashboard only, without entrance animation for clean capture
+  guia.classList.remove("on");
+  gestao.classList.remove("on");
+  topbar.style.display = "flex";
+  $("#topSub").textContent = "Dashboard · Relatório";
+  $("#btnPdfDash").style.display = "";
+  $("#btnNew").style.display = "none";
+  dash.classList.remove("anim");
+  dash.classList.add("on");
 
-  function panelBox(x, y, w, h, title) {
-    doc.setFillColor(12, 36, 62);
-    doc.setDrawColor(45, 75, 105);
-    doc.setLineWidth(0.35);
-    doc.roundedRect(x, y, w, h, 3, 3, "FD");
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(9);
-    doc.setTextColor(212, 181, 106);
-    doc.text(title, x + 5, y + 7);
+  // Inject period banner and filtered metrics
+  window.__metricsOverride = m;
+  renderDash();
+
+  // Temporary period strip under KPIs
+  let banner = document.getElementById("pdfPeriodBanner");
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.id = "pdfPeriodBanner";
+    banner.style.cssText = "max-width:1280px;margin:-8px auto 12px;padding:8px 16px;border-radius:10px;border:1px solid rgba(212,181,106,.4);background:rgba(212,181,106,.12);color:#E8D5A3;font-size:12px;font-weight:600;position:relative;z-index:2;";
+    const main = dash.querySelector(".main");
+    if (main) main.insertBefore(banner, main.firstChild);
   }
+  banner.textContent = "Período do relatório: " + fmtDate(rangeFrom) + " a " + fmtDate(rangeTo);
+  banner.style.display = "block";
 
-  const panelY = 46;
-  const panelH = 148;
-  const panelGap = 6;
-  const panelW = (pageW - 24 - panelGap) / 2;
+  // Wait for layout/fonts/charts
+  requestAnimationFrame(() => {
+    requestAnimationFrame(async () => {
+      try {
+        await new Promise(r => setTimeout(r, 350));
+        const canvas = await html2canvas(dash, {
+          scale: 2,
+          useCORS: true,
+          allowTaint: true,
+          backgroundColor: "#0C2340",
+          logging: false,
+          windowWidth: Math.max(dash.scrollWidth, 1280),
+          windowHeight: Math.max(dash.scrollHeight, 800)
+        });
 
-  // --- Evolução mensal (column chart like dashboard) ---
-  panelBox(12, panelY, panelW, panelH, "Evolução mensal");
-  const maxM = Math.max(1, ...m.months.map(mo => Math.max(mo.done, mo.opened)));
-  const chartLeft = 20;
-  const chartBottom = panelY + panelH - 18;
-  const chartTop = panelY + 14;
-  const chartH = chartBottom - chartTop;
-  const nMo = Math.max(1, m.months.length);
-  const groupW = (panelW - 28) / nMo;
-  m.months.forEach((mo, i) => {
-    const cx = chartLeft + i * groupW + groupW / 2;
-    const hDone = (mo.done / maxM) * (chartH - 6);
-    const hOpen = (mo.opened / maxM) * (chartH - 6);
-    const barW = Math.min(7, groupW * 0.32);
-    doc.setFillColor(91, 155, 213);
-    doc.roundedRect(cx - barW - 1.2, chartBottom - Math.max(1.2, hOpen), barW, Math.max(1.2, hOpen), 0.7, 0.7, "F");
-    doc.setFillColor(60, 184, 120);
-    doc.roundedRect(cx + 1.2, chartBottom - Math.max(1.2, hDone), barW, Math.max(1.2, hDone), 0.7, 0.7, "F");
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(5.5);
-    doc.setTextColor(150, 175, 195);
-    doc.text(mo.label.replace(" de ", "/"), cx, chartBottom + 4.5, { align: "center" });
-  });
-  doc.setFillColor(60, 184, 120); doc.roundedRect(18, panelY + panelH - 8, 3.2, 3.2, 0.4, 0.4, "F");
-  doc.setFontSize(6); doc.setTextColor(180, 200, 215); doc.text("Concluídas", 23, panelY + panelH - 5.5);
-  doc.setFillColor(91, 155, 213); doc.roundedRect(52, panelY + panelH - 8, 3.2, 3.2, 0.4, 0.4, "F");
-  doc.text("Abertas no mês", 57, panelY + panelH - 5.5);
+        const imgData = canvas.toDataURL("image/png", 1.0);
+        const doc = new JS({ orientation: "landscape", unit: "mm", format: "a4" });
+        const pageW = 297;
+        const pageH = 210;
 
-  // --- Status horizontal bars (dashboard-like) ---
-  const px2 = 12 + panelW + panelGap;
-  panelBox(px2, panelY, panelW, panelH * 0.42, "Distribuição por status");
-  const stList = [
-    { l: "Não iniciado", n: m.byStatus.nao_iniciado, c: [107, 114, 128] },
-    { l: "Em execução", n: m.byStatus.em_execucao, c: [66, 165, 245] },
-    { l: "Aguardando Retorno", n: m.byStatus.aguardando_retorno, c: [212, 181, 106] },
-    { l: "Concluído", n: m.byStatus.concluido, c: [60, 184, 120] },
-    { l: "Cancelado", n: m.byStatus.cancelado, c: [232, 90, 80] }
-  ];
-  const maxSt = Math.max(1, ...stList.map(s => s.n));
-  stList.forEach((s, i) => {
-    const sy = panelY + 12 + i * 9.5;
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(7);
-    doc.setTextColor(200, 215, 230);
-    doc.text(s.l, px2 + 6, sy + 3);
-    const bw = Math.max(2, (s.n / maxSt) * 58);
-    doc.setFillColor(s.c[0], s.c[1], s.c[2]);
-    doc.roundedRect(px2 + 52, sy, bw, 4.2, 1, 1, "F");
-    doc.setTextColor(255, 255, 255);
-    doc.setFont("helvetica", "bold");
-    doc.text(String(s.n), px2 + panelW - 8, sy + 3.3, { align: "right" });
-  });
+        // Fit image covering page while keeping aspect
+        const imgW = canvas.width;
+        const imgH = canvas.height;
+        const ratio = Math.min(pageW / imgW, pageH / imgH);
+        const w = imgW * ratio;
+        const h = imgH * ratio;
+        const x = (pageW - w) / 2;
+        const y = (pageH - h) / 2;
 
-  // --- Responsável + Área ---
-  const py3 = panelY + panelH * 0.42 + 5;
-  const ph3 = panelH * 0.58 - 5;
-  panelBox(px2, py3, panelW / 2 - 2.5, ph3, "Por responsável");
-  const respEntries = Object.entries(m.byResp)
-    .map(([name, v]) => ({ name, done: v.done, total: v.total }))
-    .sort((a, b) => b.done - a.done || b.total - a.total).slice(0, 7);
-  if (!respEntries.length) {
-    doc.setFont("helvetica", "italic"); doc.setFontSize(7); doc.setTextColor(150, 170, 190);
-    doc.text("Sem dados", px2 + 6, py3 + 18);
-  } else {
-    const maxR = Math.max(1, ...respEntries.map(r => r.total));
-    respEntries.forEach((r, i) => {
-      const ry = py3 + 12 + i * 9;
-      doc.setFont("helvetica", "normal"); doc.setFontSize(6.5); doc.setTextColor(200, 215, 230);
-      doc.text(r.name.slice(0, 14), px2 + 5, ry + 2.5);
-      const bw = Math.max(1.5, (r.total / maxR) * 42);
-      doc.setFillColor(30, 70, 110);
-      doc.roundedRect(px2 + 40, ry, bw, 3.8, 0.8, 0.8, "F");
-      doc.setFillColor(212, 181, 106);
-      const doneW = r.total ? (r.done / r.total) * bw : 0;
-      if (doneW > 0.5) doc.roundedRect(px2 + 40, ry, doneW, 3.8, 0.8, 0.8, "F");
-      doc.setTextColor(220, 230, 240);
-      doc.text(String(r.done) + "/" + r.total, px2 + panelW / 2 - 6, ry + 2.8, { align: "right" });
+        // Navy fill behind
+        doc.setFillColor(12, 35, 64);
+        doc.rect(0, 0, pageW, pageH, "F");
+        doc.addImage(imgData, "PNG", x, y, w, h);
+
+        const fname = "ActionHub_Dashboard_" + rangeFrom + "_" + rangeTo + ".pdf";
+        doc.save(fname);
+        toast("PDF gerado", "ok");
+      } catch (err) {
+        console.error(err);
+        toast("Erro ao gerar PDF", "err");
+      } finally {
+        // Restore UI
+        window.__metricsOverride = null;
+        const b = document.getElementById("pdfPeriodBanner");
+        if (b) b.style.display = "none";
+
+        if (state.guia) {
+          showGuia();
+        } else if (state.gestao) {
+          showGestao();
+        } else {
+          showDash();
+        }
+        if (btn) { btn.disabled = false; btn.textContent = "Gerar PDF"; }
+      }
     });
-  }
-
-  panelBox(px2 + panelW / 2 + 2.5, py3, panelW / 2 - 2.5, ph3, "Por área");
-  const areaEntries = Object.entries(m.byArea).map(([name, n]) => ({ name, n })).sort((a, b) => b.n - a.n).slice(0, 7);
-  const ax = px2 + panelW / 2 + 2.5;
-  if (!areaEntries.length) {
-    doc.setFont("helvetica", "italic"); doc.setFontSize(7); doc.setTextColor(150, 170, 190);
-    doc.text("Sem dados", ax + 6, py3 + 18);
-  } else {
-    const maxA = Math.max(1, ...areaEntries.map(r => r.n));
-    areaEntries.forEach((r, i) => {
-      const ry = py3 + 12 + i * 9;
-      doc.setFont("helvetica", "normal"); doc.setFontSize(6.5); doc.setTextColor(200, 215, 230);
-      doc.text(r.name.slice(0, 12), ax + 5, ry + 2.5);
-      const bw = Math.max(1.5, (r.n / maxA) * 40);
-      doc.setFillColor(30, 70, 110);
-      doc.roundedRect(ax + 38, ry, bw, 3.8, 0.8, 0.8, "F");
-      doc.setFillColor(60, 184, 120);
-      doc.roundedRect(ax + 38 + Math.max(0, bw - 4), ry, Math.min(4, bw), 3.8, 0.5, 0.5, "F");
-      doc.setTextColor(220, 230, 240);
-      doc.text(String(r.n), ax + panelW / 2 - 8, ry + 2.8, { align: "right" });
-    });
-  }
-
-  doc.setFontSize(6.5);
-  doc.setTextColor(130, 150, 170);
-  doc.text("SGQ Carmak · Action Hub Qualidade · Gerado automaticamente", 12, pageH - 5);
-  doc.text("Página 1 de 1", pageW - 12, pageH - 5, { align: "right" });
-
-  const fname = "ActionHub_Dashboard_" + (rangeFrom || today()).slice(0, 10) + "_" + (rangeTo || today()).slice(0, 10) + ".pdf";
-  doc.save(fname);
-  toast("PDF gerado", "ok");
+  });
 }
 
 
