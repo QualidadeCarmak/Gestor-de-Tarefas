@@ -1720,35 +1720,33 @@ function exportPdfDashboardWithRange(rangeFrom, rangeTo) {
   const gestao = $("#screenGestao");
   const topbar = $("#topbar");
 
-  // Remember UI state
   const state = {
     guia: guia.classList.contains("on"),
     dash: dash.classList.contains("on"),
     gestao: gestao.classList.contains("on"),
-    topbar: topbar.style.display,
     topSub: $("#topSub").textContent,
-    anim: dash.classList.contains("anim")
+    btnNewDisp: $("#btnNew").style.display,
+    btnPdfDisp: $("#btnPdfDash").style.display,
+    btnBackDisp: $("#btnBackGuia").style.display
   };
 
   const btn = $("#btnReportGo");
   if (btn) { btn.disabled = true; btn.textContent = "Gerando…"; }
   toast("Montando relatório…", "ok");
 
-  // Show dashboard only, without entrance animation for clean capture
   guia.classList.remove("on");
   gestao.classList.remove("on");
   topbar.style.display = "flex";
-  $("#topSub").textContent = "Dashboard · Relatório";
-  $("#btnPdfDash").style.display = "";
+  $("#topSub").textContent = "Dashboard";
   $("#btnNew").style.display = "none";
+  $("#btnPdfDash").style.display = "none";
+  $("#btnBackGuia").style.display = "none";
   dash.classList.remove("anim");
   dash.classList.add("on");
 
-  // Inject period banner and filtered metrics
   window.__metricsOverride = m;
   renderDash();
 
-  // Temporary period strip under KPIs
   let banner = document.getElementById("pdfPeriodBanner");
   if (!banner) {
     banner = document.createElement("div");
@@ -1760,19 +1758,54 @@ function exportPdfDashboardWithRange(rangeFrom, rangeTo) {
   banner.textContent = "Período do relatório: " + fmtDate(rangeFrom) + " a " + fmtDate(rangeTo);
   banner.style.display = "block";
 
-  // Wait for layout/fonts/charts
+  // Wrapper with topbar + dashboard for a single clean capture
+  let wrap = document.getElementById("pdfCaptureWrap");
+  if (wrap) wrap.remove();
+  wrap = document.createElement("div");
+  wrap.id = "pdfCaptureWrap";
+  wrap.style.cssText = "position:fixed;left:0;top:0;width:1400px;z-index:99999;background:#061220;overflow:hidden;";
+
+  const topClone = topbar.cloneNode(true);
+  topClone.id = "pdfTopClone";
+  topClone.style.position = "relative";
+  topClone.style.width = "100%";
+
+  // Title line in clone
+  const titleEl = topClone.querySelector(".title");
+  if (titleEl) {
+    titleEl.innerHTML = 'Action Hub Qualidade<small>Carmak · Relatório de Dashboard · ' + fmtDate(rangeFrom) + ' a ' + fmtDate(rangeTo) + '</small>';
+  }
+
+  const dashClone = dash.cloneNode(true);
+  dashClone.id = "pdfDashClone";
+  dashClone.classList.remove("anim");
+  dashClone.classList.add("on");
+  dashClone.style.display = "block";
+  dashClone.style.minHeight = "auto";
+  dashClone.style.position = "relative";
+
+  wrap.appendChild(topClone);
+  wrap.appendChild(dashClone);
+  document.body.appendChild(wrap);
+
+  // Hide live UI while capturing clone
+  topbar.style.visibility = "hidden";
+  dash.style.visibility = "hidden";
+
   requestAnimationFrame(() => {
     requestAnimationFrame(async () => {
       try {
-        await new Promise(r => setTimeout(r, 350));
-        const canvas = await html2canvas(dash, {
+        await new Promise(r => setTimeout(r, 400));
+        const canvas = await html2canvas(wrap, {
           scale: 2,
           useCORS: true,
           allowTaint: true,
-          backgroundColor: "#0C2340",
+          backgroundColor: "#061220",
           logging: false,
-          windowWidth: Math.max(dash.scrollWidth, 1280),
-          windowHeight: Math.max(dash.scrollHeight, 800)
+          width: wrap.scrollWidth,
+          height: wrap.scrollHeight,
+          windowWidth: wrap.scrollWidth,
+          windowHeight: wrap.scrollHeight
         });
 
         const imgData = canvas.toDataURL("image/png", 1.0);
@@ -1780,7 +1813,6 @@ function exportPdfDashboardWithRange(rangeFrom, rangeTo) {
         const pageW = 297;
         const pageH = 210;
 
-        // Fit image covering page while keeping aspect
         const imgW = canvas.width;
         const imgH = canvas.height;
         const ratio = Math.min(pageW / imgW, pageH / imgH);
@@ -1789,8 +1821,7 @@ function exportPdfDashboardWithRange(rangeFrom, rangeTo) {
         const x = (pageW - w) / 2;
         const y = (pageH - h) / 2;
 
-        // Navy fill behind
-        doc.setFillColor(12, 35, 64);
+        doc.setFillColor(6, 18, 32);
         doc.rect(0, 0, pageW, pageH, "F");
         doc.addImage(imgData, "PNG", x, y, w, h);
 
@@ -1801,18 +1832,21 @@ function exportPdfDashboardWithRange(rangeFrom, rangeTo) {
         console.error(err);
         toast("Erro ao gerar PDF", "err");
       } finally {
-        // Restore UI
         window.__metricsOverride = null;
         const b = document.getElementById("pdfPeriodBanner");
         if (b) b.style.display = "none";
+        const wEl = document.getElementById("pdfCaptureWrap");
+        if (wEl) wEl.remove();
+        topbar.style.visibility = "";
+        dash.style.visibility = "";
+        $("#btnNew").style.display = state.btnNewDisp || "";
+        $("#btnPdfDash").style.display = state.btnPdfDisp || "";
+        $("#btnBackGuia").style.display = state.btnBackDisp || "";
 
-        if (state.guia) {
-          showGuia();
-        } else if (state.gestao) {
-          showGestao();
-        } else {
-          showDash();
-        }
+        if (state.guia) showGuia();
+        else if (state.gestao) showGestao();
+        else showDash();
+
         if (btn) { btn.disabled = false; btn.textContent = "Gerar PDF"; }
       }
     });
