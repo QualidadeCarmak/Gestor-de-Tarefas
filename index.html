@@ -441,47 +441,62 @@ table.demands tr.aguardando td { background: #FFFBEB !important; }
 }
 
 .k-card {
-  background: linear-gradient(165deg, #FFFFFF 0%, #F4F7FB 100%);
-  border: 1px solid #C5D3E0;
   border-radius: 12px;
   padding: 12px 12px 10px; cursor: grab;
   transition: box-shadow .18s, transform .18s, border-color .18s;
   border-left: 5px solid #94A3B8;
+  border: 1px solid #C5D3E0;
+  border-left-width: 5px;
   box-shadow: 0 3px 12px rgba(12,35,64,.08), inset 0 1px 0 rgba(255,255,255,.9);
   user-select: none;
   position: relative;
+  background: linear-gradient(165deg, #FFFFFF 0%, #F4F7FB 100%);
 }
-.k-card::after {
-  content: ""; position: absolute; right: 10px; top: 10px;
-  width: 6px; height: 6px; border-radius: 50%; background: rgba(12,35,64,.12);
+.k-card .k-prio-dot {
+  position: absolute; right: 10px; top: 10px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #94A3B8;
+  box-shadow: 0 0 0 2px rgba(255,255,255,.8);
 }
+.k-card .k-prio-dot.alta { background: #C62828; }
+.k-card .k-prio-dot.media { background: #D4B56A; }
+.k-card .k-prio-dot.baixa { background: #1565C0; }
 .k-card:hover {
   box-shadow: 0 10px 24px rgba(12,35,64,.14);
   transform: translateY(-2px);
-  border-color: #A8B8C8;
 }
 .k-card:active { cursor: grabbing; }
 .k-card.dragging { opacity: .5; transform: rotate(1.5deg) scale(.97); }
-.k-card.prio-alta {
-  border-left-color: #C62828;
-  background: linear-gradient(165deg, #FFF8F8 0%, #FFE8E8 100%);
-  border-color: #F0C0C0;
+
+/* Cores por STATUS (coluna) */
+.k-card.st-nao_iniciado {
+  border-left-color: #6B7280;
+  border-color: #C5CDD6;
+  background: linear-gradient(165deg, #FAFBFC 0%, #EEF1F4 100%);
 }
-.k-card.prio-alta::after { background: #C62828; }
-.k-card.prio-media {
-  border-left-color: #C4A35A;
-  background: linear-gradient(165deg, #FFFCF5 0%, #F8F0DC 100%);
-  border-color: #E5D4A8;
-}
-.k-card.prio-media::after { background: #D4B56A; }
-.k-card.prio-baixa {
+.k-card.st-em_execucao {
   border-left-color: #1565C0;
-  background: linear-gradient(165deg, #F5F9FF 0%, #E3EEF9 100%);
-  border-color: #B8D0E8;
+  border-color: #B3D4F0;
+  background: linear-gradient(165deg, #F3F9FF 0%, #D6E9FA 100%);
 }
-.k-card.prio-baixa::after { background: #1565C0; }
-.k-card.overdue {
-  box-shadow: 0 3px 12px rgba(198,40,40,.15), inset 0 0 0 1px rgba(198,40,40,.2);
+.k-card.st-aguardando_retorno {
+  border-left-color: #C47A00;
+  border-color: #E8D4A0;
+  background: linear-gradient(165deg, #FFFCF3 0%, #F7EBC8 100%);
+}
+.k-card.st-concluido {
+  border-left-color: #1B7A45;
+  border-color: #A8D4B8;
+  background: linear-gradient(165deg, #F3FBF6 0%, #D4F0E0 100%);
+}
+.k-card.st-cancelado {
+  border-left-color: #C62828;
+  border-color: #E8B0B0;
+  background: linear-gradient(165deg, #FFF6F6 0%, #F5D6D6 100%);
+  opacity: 0.92;
+}
+.k-card.overdue:not(.st-concluido):not(.st-cancelado) {
+  box-shadow: 0 3px 12px rgba(198,40,40,.18), inset 0 0 0 1px rgba(198,40,40,.25);
 }
 .k-card .k-id {
   font-size: 10px; font-weight: 800; color: var(--navy); letter-spacing: .04em; margin-bottom: 5px;
@@ -1208,9 +1223,10 @@ function renderKanban() {
     const items = sortCol(list.filter(d => d.status === st.v));
     const cards = items.map(d => {
       const isOverdue = d.previsto && d.previsto < now && !["concluido","cancelado"].includes(d.status);
-      const prioCls = d.prioridade === "Alta" ? "prio-alta" : d.prioridade === "Media" ? "prio-media" : "prio-baixa";
       const dueCls = isOverdue ? "bad" : (d.previsto && daysBetween(now, d.previsto) <= 7 ? "warn" : "");
-      return `<div class="k-card ${prioCls}${isOverdue ? " overdue" : ""}" draggable="true" data-id="${esc(d.id)}">
+      const prioDot = d.prioridade === "Alta" ? "alta" : d.prioridade === "Media" ? "media" : "baixa";
+      return `<div class="k-card st-${st.v}${isOverdue ? " overdue" : ""}" draggable="true" data-id="${esc(d.id)}">
+        <span class="k-prio-dot ${prioDot}" title="Prioridade: ${esc(d.prioridade === "Media" ? "Média" : d.prioridade)}"></span>
         <div class="k-id">${esc(d.id)}${isOverdue ? ' <span class="k-flag">⚠ vencida</span>' : ""}</div>
         <div class="k-title" title="${esc(d.descricao || "")}">${esc(d.descricao || "—")}</div>
         <div class="k-meta">
